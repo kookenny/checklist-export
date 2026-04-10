@@ -1024,42 +1024,41 @@ DATA_FONT      = Font(size=10)
 DATA_ALIGN     = Alignment(vertical="top", wrap_text=True)
 DATA_ALIGN_NW  = Alignment(vertical="top", wrap_text=False)
 
-# Column layout: A through T (20 columns)
+# Column layout: A through S (19 columns)
 COLUMN_HEADERS = [
     "Procedure Text",                    # A
-    "Authoritative reference",           # B
-    "Assertions Tested",                 # C
+    "Authoritative Reference",           # B
+    "Assertions",                        # C
     "Lightbulb Guidance",                # D
-    "Override the checklist settings",   # E
-    "Allow Sign offs",                   # F
-    "Allow Input Notes in procedures",   # G
-    "Notes Placeholder",                 # H
-    "Allow multiple rows",               # I
-    "Response Placeholder",              # J
-    "Response Type",                     # K
-    "Display inline",                    # L
-    "Options",                           # M
-    "Show Response Beneath Procedure",   # N
-    "",                                  # O (gap)
-    "Condition 1",                       # P
-    "Condition 2",                       # Q
-    "Condition 3",                       # R
-    "Condition 4",                       # S
-    "Condition 5",                       # T
+    "Response Placeholder",              # E
+    "Response Type",                     # F
+    "Options",                           # G
+    "Display inline",                    # H
+    "Allow Input Notes in procedures",   # I
+    "Notes Placeholder",                 # J
+    "Allow Sign offs",                   # K
+    "Condition 1",                       # L
+    "Condition 2",                       # M
+    "Condition 3",                       # N
+    "Condition 4",                       # O
+    "Condition 5",                       # P
+    "Allow multiple rows",               # Q
+    "Show Response Beneath Procedure",   # R
+    "Override the checklist settings",   # S
 ]
 
 COLUMN_WIDTHS = {
     "A": 80, "B": 18, "C": 18, "D": 50,
-    "E": 12, "F": 12, "G": 12, "H": 22, "I": 12,
-    "J": 22, "K": 15, "L": 12, "M": 40, "N": 12,
-    "O": 3,
-    "P": 50, "Q": 50, "R": 50, "S": 50, "T": 50,
+    "E": 22, "F": 15, "G": 40, "H": 12,
+    "I": 12, "J": 22, "K": 12,
+    "L": 50, "M": 50, "N": 50, "O": 50, "P": 50,
+    "Q": 12, "R": 12, "S": 12,
 }
 
 
 # ── EXCEL WRITING ────────────────────────────────────────────────────────────
 
-def _apply_header_style(ws, row_num: int, max_col: int = 20):
+def _apply_header_style(ws, row_num: int, max_col: int = 19):
     """Apply header fill/font to an entire row."""
     for col in range(1, max_col + 1):
         cell = ws.cell(row=row_num, column=col)
@@ -1068,7 +1067,7 @@ def _apply_header_style(ws, row_num: int, max_col: int = 20):
         cell.alignment = HEADER_ALIGN
 
 
-def _apply_section_style(ws, row_num: int, max_col: int = 20):
+def _apply_section_style(ws, row_num: int, max_col: int = 19):
     """Apply section header fill/font to an entire row."""
     for col in range(1, max_col + 1):
         cell = ws.cell(row=row_num, column=col)
@@ -1087,35 +1086,33 @@ def _write_procedure_row(ws, row_num: int, text: str, standards: str,
     ws.cell(row=row_num, column=3, value=assertions).alignment = DATA_ALIGN_NW   # C
     ws.cell(row=row_num, column=4, value=guidance).alignment = DATA_ALIGN        # D
 
-    # Settings columns E-I
-    ws.cell(row=row_num, column=5, value=settings.get("override")).alignment = DATA_ALIGN_NW     # E
-    ws.cell(row=row_num, column=6, value=settings.get("allow_signoffs")).alignment = DATA_ALIGN_NW  # F
-    ws.cell(row=row_num, column=7, value=settings.get("allow_notes")).alignment = DATA_ALIGN_NW  # G
-    ws.cell(row=row_num, column=8, value=settings.get("notes_placeholder", "")).alignment = DATA_ALIGN  # H
-    ws.cell(row=row_num, column=9, value=settings.get("allow_multiple_rows")).alignment = DATA_ALIGN_NW  # I
+    # Response set columns E-H
+    ws.cell(row=row_num, column=5, value=rs_row.get("response_placeholder", "")).alignment = DATA_ALIGN  # E
+    ws.cell(row=row_num, column=6, value=rs_row.get("response_type", "")).alignment = DATA_ALIGN_NW  # F
+    ws.cell(row=row_num, column=7, value=rs_row.get("options", "")).alignment = DATA_ALIGN  # G
+    ws.cell(row=row_num, column=8, value=rs_row.get("display_inline")).alignment = DATA_ALIGN_NW  # H
 
-    # Response set columns J-M
-    ws.cell(row=row_num, column=10, value=rs_row.get("response_placeholder", "")).alignment = DATA_ALIGN  # J
-    ws.cell(row=row_num, column=11, value=rs_row.get("response_type", "")).alignment = DATA_ALIGN_NW  # K
-    ws.cell(row=row_num, column=12, value=rs_row.get("display_inline")).alignment = DATA_ALIGN_NW  # L
-    ws.cell(row=row_num, column=13, value=rs_row.get("options", "")).alignment = DATA_ALIGN  # M
+    # Settings columns I-K
+    ws.cell(row=row_num, column=9, value=settings.get("allow_notes")).alignment = DATA_ALIGN_NW  # I
+    ws.cell(row=row_num, column=10, value=settings.get("notes_placeholder", "")).alignment = DATA_ALIGN  # J
+    ws.cell(row=row_num, column=11, value=settings.get("allow_signoffs")).alignment = DATA_ALIGN_NW  # K
 
-    # Column N
-    ws.cell(row=row_num, column=14, value=settings.get("show_beneath")).alignment = DATA_ALIGN_NW  # N
-
-    # Column O is gap (empty)
-
-    # Visibility columns P-T (columns 16-20)
+    # Visibility columns L-P (columns 12-16)
     for i, vis_text in enumerate(vis_columns):
-        ws.cell(row=row_num, column=16 + i, value=vis_text).alignment = DATA_ALIGN  # P-T
+        ws.cell(row=row_num, column=12 + i, value=vis_text).alignment = DATA_ALIGN  # L-P
+
+    # Settings columns Q-S
+    ws.cell(row=row_num, column=17, value=settings.get("allow_multiple_rows")).alignment = DATA_ALIGN_NW  # Q
+    ws.cell(row=row_num, column=18, value=settings.get("show_beneath")).alignment = DATA_ALIGN_NW  # R
+    ws.cell(row=row_num, column=19, value=settings.get("override")).alignment = DATA_ALIGN_NW  # S
 
 
 def _write_response_set_only_row(ws, row_num: int, rs_row: dict):
-    """Write a row that only has response set columns J-M (for multi-response procedures)."""
-    ws.cell(row=row_num, column=10, value=rs_row.get("response_placeholder", "")).alignment = DATA_ALIGN
-    ws.cell(row=row_num, column=11, value=rs_row.get("response_type", "")).alignment = DATA_ALIGN_NW
-    ws.cell(row=row_num, column=12, value=rs_row.get("display_inline")).alignment = DATA_ALIGN_NW
-    ws.cell(row=row_num, column=13, value=rs_row.get("options", "")).alignment = DATA_ALIGN
+    """Write a row that only has response set columns E-H (for multi-response procedures)."""
+    ws.cell(row=row_num, column=5, value=rs_row.get("response_placeholder", "")).alignment = DATA_ALIGN
+    ws.cell(row=row_num, column=6, value=rs_row.get("response_type", "")).alignment = DATA_ALIGN_NW
+    ws.cell(row=row_num, column=7, value=rs_row.get("options", "")).alignment = DATA_ALIGN
+    ws.cell(row=row_num, column=8, value=rs_row.get("display_inline")).alignment = DATA_ALIGN_NW
 
 
 def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
@@ -1129,17 +1126,23 @@ def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
     # Style entire row first
     _apply_header_style(ws, 1)
 
-    ws.merge_cells("D1:O1")
-    ws["D1"].value = "Cloud Settings"
-    ws["D1"].fill = HEADER_FILL
-    ws["D1"].font = HEADER_FONT
-    ws["D1"].alignment = HEADER_ALIGN
+    ws.merge_cells("E1:K1")
+    ws["E1"].value = "Cloud Settings"
+    ws["E1"].fill = HEADER_FILL
+    ws["E1"].font = HEADER_FONT
+    ws["E1"].alignment = HEADER_ALIGN
 
-    ws.merge_cells("P1:T1")
-    ws["P1"].value = "Visibility Settings"
-    ws["P1"].fill = HEADER_FILL
-    ws["P1"].font = HEADER_FONT
-    ws["P1"].alignment = HEADER_ALIGN
+    ws.merge_cells("L1:P1")
+    ws["L1"].value = "Visibility Settings"
+    ws["L1"].fill = HEADER_FILL
+    ws["L1"].font = HEADER_FONT
+    ws["L1"].alignment = HEADER_ALIGN
+
+    ws.merge_cells("Q1:S1")
+    ws["Q1"].value = "Cloud Settings"
+    ws["Q1"].fill = HEADER_FILL
+    ws["Q1"].font = HEADER_FONT
+    ws["Q1"].alignment = HEADER_ALIGN
 
     # ── Row 2: Column headers ──
     for col_idx, header in enumerate(COLUMN_HEADERS, start=1):
@@ -1156,7 +1159,7 @@ def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
     ws.freeze_panes = "A3"
 
     # Auto-filter on row 2
-    ws.auto_filter.ref = f"A2:T2"
+    ws.auto_filter.ref = f"A2:S2"
 
     # ── Build tree and classify ──
     by_id = {p["id"]: p for p in procedures if "id" in p}
@@ -1184,7 +1187,7 @@ def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
             # Section headers can still have visibility conditions
             vis_columns_sh = format_visibility_columns(proc, by_id, lookup, tag_lookup)
             for i, vis_text in enumerate(vis_columns_sh):
-                ws.cell(row=row_num, column=16 + i, value=vis_text).alignment = DATA_ALIGN
+                ws.cell(row=row_num, column=12 + i, value=vis_text).alignment = DATA_ALIGN
             row_num += 1
             continue
 
@@ -1205,7 +1208,7 @@ def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
             ws.cell(row=row_num, column=2, value=standards_g).alignment = DATA_ALIGN
             ws.cell(row=row_num, column=3, value=assertions_g).alignment = DATA_ALIGN_NW
             for i, vis_text in enumerate(vis_columns_g):
-                ws.cell(row=row_num, column=16 + i, value=vis_text).alignment = DATA_ALIGN
+                ws.cell(row=row_num, column=12 + i, value=vis_text).alignment = DATA_ALIGN
             row_num += 1
             continue
 
@@ -1231,8 +1234,9 @@ def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
 
             # Merge cells that span all response rows
             if start_row < end_row:
-                merge_cols = ["A", "B", "C", "D", "E", "F", "G", "H", "I",
-                              "N", "O", "P", "Q", "R", "S", "T"]
+                merge_cols = ["A", "B", "C", "D",
+                              "J", "K", "L", "M", "N", "O", "P",
+                              "Q", "R", "S"]
                 for col in merge_cols:
                     ws.merge_cells(f"{col}{start_row}:{col}{end_row}")
 

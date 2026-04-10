@@ -2,7 +2,7 @@
 
 ## Objective
 
-Extract full checklist content (procedures, settings, visibility rules) from a CaseWare Cloud SE author template and produce an Excel workbook. Each checklist becomes a separate sheet.
+Extract full checklist content (procedures, settings, visibility rules) from a Caseware Cloud SE author template and produce an Excel workbook. Each checklist becomes a separate sheet.
 
 ## Prerequisites
 
@@ -68,12 +68,13 @@ Excel workbook with columns:
 | Column | Content |
 |--------|---------|
 | A | Procedure Text (full hierarchy) |
-| B | Authoritative reference (e.g. AU-C 520.05) |
-| C | Assertions Tested (C, E, A, V, PD) |
+| B | Authoritative Reference (e.g. AU-C 520.05) |
+| C | Assertions (C, E, A, V, PD) |
 | D | Lightbulb Guidance |
-| E-N | Cloud Settings (override, sign-offs, response types, options) |
-| O | Gap column |
-| P-T | Visibility Conditions 1-5 |
+| E-H | Response settings (placeholder, type, options, display inline) |
+| I-K | Cloud Settings (input notes, notes placeholder, sign-offs) |
+| L-P | Visibility Conditions 1-5 |
+| Q-S | Cloud Settings (allow multiple rows, show response beneath, override) |
 
 ### Row Types
 
@@ -86,11 +87,11 @@ Excel workbook with columns:
 
 | Column | API Source |
 |--------|-----------|
-| Authoritative reference | `proc.attachables` where `kind="citation"` → `labels.en` |
+| Authoritative Reference | `proc.attachables` where `kind="citation"` → `labels.en` |
 | Assertions | `proc.tagging.baseassertion` → resolved via `tag/get` (subKind=baseassertion) → mapped to C,E,A,V,PD |
 | Guidance | `proc.guidances.en` or `proc.guidance` |
-| Settings E-N | `proc.settings` or inherited from `checklist/get` defaults |
-| Visibility P-T | `proc.visibility.conditions[]` — types: response, rmm_rank, enum_value, boolean_value, condition_group, organization_type, consolidation |
+| Settings E-K, Q-S | `proc.settings` or inherited from `checklist/get` defaults |
+| Visibility L-P | `proc.visibility.conditions[]` — types: response, rmm_rank, enum_value, boolean_value, condition_group, organization_type, consolidation |
 
 ### Assertion Mapping
 
