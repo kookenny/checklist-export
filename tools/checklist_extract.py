@@ -30,12 +30,20 @@ import os
 import logging
 import re
 from html import unescape
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import requests as http_lib
 import openpyxl
+from openpyxl.cell.rich_text import CellRichText, TextBlock
+from openpyxl.cell.text import InlineFont
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+
+class TextSegment(NamedTuple):
+    """A run of text with an optional hyperlink flag."""
+    text: str
+    is_link: bool = False
 
 # ── CONFIGURATION ─────────────────────────────────────────────────────────────
 
@@ -55,10 +63,32 @@ log = logging.getLogger(__name__)
 
 # ── HTML / TEXT PROCESSING ───────────────────────────────────────────────────
 
+def _convert_block_html(html: str) -> str:
+    """Convert block-level HTML elements to text equivalents before tag stripping.
+
+    Turns <li> into bulleted lines, <br> into newlines, and paragraph
+    boundaries into newlines so list/block structure survives tag removal."""
+    text = re.sub(r'<br\s*/?>', '\n', html, flags=re.IGNORECASE)
+    text = re.sub(r'</p>\s*<p[^>]*>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<li[^>]*>', '\n  \u2022 ', text, flags=re.IGNORECASE)
+    text = re.sub(r'</li>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?[uo]l[^>]*>', '\n', text, flags=re.IGNORECASE)
+    return text
+
+
+def _collapse_whitespace(text: str) -> str:
+    """Collapse whitespace while preserving newlines."""
+    text = re.sub(r"[^\S\n]+", " ", text)   # collapse spaces/tabs, keep newlines
+    text = re.sub(r" *\n *", "\n", text)     # trim spaces around newlines
+    text = re.sub(r"\n{3,}", "\n\n", text)   # cap consecutive newlines at 2
+    return text.strip()
+
+
 def strip_html(html: str, formula_map: dict[str, str] | None = None) -> str:
     """Convert an HTML string to plain text by removing tags and unescaping entities.
     Placeholder spans are wrapped in (( )).
-    Formula/dynamic-text spans are resolved via *formula_map* and wrapped in [[ ]]."""
+    Formula/dynamic-text spans are resolved via *formula_map* and wrapped in [[ ]].
+    List and block structure (<ul>/<ol>/<li>/<br>/<p>) is preserved as newlines and bullets."""
     if not html:
         return ""
     text = re.sub(
@@ -76,10 +106,112 @@ def strip_html(html: str, formula_map: dict[str, str] | None = None) -> str:
             _resolve_formula,
             text,
         )
+    text = _convert_block_html(text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = unescape(text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return _collapse_whitespace(text)
+
+
+def parse_html_segments(html: str, formula_map: dict[str, str] | None = None,
+                         attachables: dict | None = None,
+                         doc_labels: dict[str, str] | None = None) -> list[TextSegment]:
+    """Parse HTML into text segments, preserving <a> tag boundaries.
+
+    Returns a list of TextSegment tuples. Segments with is_link=True represent
+    text that was inside an <a> tag. When no <a> tags are present, returns a
+    single non-link segment equivalent to calling strip_html().
+
+    Handles two CaseWare link patterns:
+    - <a href="...">text</a>  — standard hyperlink; inner text is the label
+    - <a reference="id" class="reference"></a>  — CaseWare internal document link
+      with empty inner text; label is resolved from attachables via doc_labels
+    """
+    if not html:
+        return [TextSegment("")]
+
+    # Pre-process placeholder and formula spans (same as strip_html)
+    text = re.sub(
+        r'<span[^>]*\bplaceholder="[^"]*"[^>]*>(.*?)</span>',
+        r"((\1))",
+        html,
+    )
+    if formula_map:
+        def _resolve_formula(m: re.Match) -> str:
+            fid = m.group(1)
+            val = formula_map.get(fid, "")
+            return f"[[{val}]]" if val else ""
+        text = re.sub(
+            r'<span[^>]*\bformula="([^"]*)"[^>]*>.*?</span>',
+            _resolve_formula,
+            text,
+        )
+
+    # Convert block-level HTML to text structure before anchor parsing so that
+    # list items containing <a> tags still get bullet/newline treatment.
+    text = _convert_block_html(text)
+
+    def _clean(fragment: str) -> str:
+        """Strip all remaining tags, unescape entities, collapse whitespace."""
+        fragment = re.sub(r"<[^>]+>", " ", fragment)
+        fragment = unescape(fragment)
+        return _collapse_whitespace(fragment)
+
+    anchor_pat = re.compile(r'<a\b([^>]*)>(.*?)</a>', re.DOTALL | re.IGNORECASE)
+    segments: list[TextSegment] = []
+    last_end = 0
+
+    for m in anchor_pat.finditer(text):
+        before = _clean(text[last_end:m.start()])
+        if before:
+            segments.append(TextSegment(before, is_link=False))
+
+        attrs_str = m.group(1)
+        inner = _clean(m.group(2)).strip()
+
+        if not inner:
+            # CaseWare internal reference link: <a reference="id" class="reference"></a>
+            ref_match = re.search(r'\breference="([^"]*)"', attrs_str)
+            if ref_match:
+                ref_id = ref_match.group(1)
+                att = (attachables or {}).get(ref_id, {})
+                if att.get("kind") == "link":
+                    # Try label fields first
+                    inner = att.get("label") or att.get("labels", {}).get("en") or ""
+                    if not inner and doc_labels:
+                        # The attachable's field holding the document ID varies by
+                        # CaseWare version — try all string values against doc_labels
+                        _skip = {"kind", "label", "labels", "order", "class"}
+                        for key, val in att.items():
+                            if key in _skip or not isinstance(val, str):
+                                continue
+                            if val in doc_labels:
+                                inner = doc_labels[val]
+                                break
+                        # Also try the reference key itself (may be a doc ID directly)
+                        if not inner and ref_id in doc_labels:
+                            inner = doc_labels[ref_id]
+                    if not inner:
+                        log.debug("Unresolved link attachable %s: %s", ref_id, att)
+                        inner = "[Link]"
+                # citations are handled separately; skip non-link empty anchors
+
+        if inner:
+            segments.append(TextSegment(inner, is_link=True))
+
+        last_end = m.end()
+
+    after = _clean(text[last_end:])
+    if after:
+        segments.append(TextSegment(after, is_link=False))
+
+    if not segments:
+        return [TextSegment("")]
+
+    # Trim leading/trailing whitespace from the outer edges only
+    segments[0] = TextSegment(segments[0].text.lstrip(), segments[0].is_link)
+    segments[-1] = TextSegment(segments[-1].text.rstrip(), segments[-1].is_link)
+
+    return segments
 
 
 # ── SESSION ───────────────────────────────────────────────────────────────────
@@ -338,7 +470,7 @@ def fetch_tag_lookup(session: http_lib.Session,
 # ── PROCEDURE HELPERS ────────────────────────────────────────────────────────
 
 def _get_procedure_name(proc: dict) -> str:
-    """Return the display name of a procedure."""
+    """Return the display name of a procedure as a plain string."""
     summary = proc.get("summaryNames") or {}
     name = summary.get("en", "") or next(iter(summary.values()), "")
     if not name:
@@ -346,12 +478,32 @@ def _get_procedure_name(proc: dict) -> str:
     return name
 
 
-def _get_procedure_display_text(proc: dict) -> str:
-    """Return the full display text for a procedure, including number prefix."""
-    name = _get_procedure_name(proc)
+def _get_procedure_display_text(proc: dict,
+                                doc_labels: dict[str, str] | None = None) -> "str | CellRichText":
+    """Return the full display text for a procedure for Excel cell output.
+
+    Parses proc.text HTML to produce a CellRichText with underlined runs when
+    hyperlinks are present. Falls back to a plain string otherwise."""
+    proc_html = proc.get("text", "")
     number = proc.get("number", "")
-    if number and name and not name.startswith(number):
-        return f"{number}. {name}"
+    prefix = f"{number}. " if number else ""
+
+    if proc_html and "<a" in proc_html:
+        attachables = proc.get("attachables") or {}
+        segments = parse_html_segments(proc_html, attachables=attachables,
+                                       doc_labels=doc_labels)
+        value = _segments_to_cell_value(segments)
+        if isinstance(value, CellRichText):
+            return CellRichText(prefix, *value) if prefix else value
+        # Plain string result (no links resolved) — apply prefix normally
+        if prefix and not value.startswith(number):
+            return f"{prefix}{value}"
+        return value
+
+    # No links — plain string path
+    name = _get_procedure_name(proc)
+    if prefix and name and not name.startswith(number):
+        return f"{prefix}{name}"
     return name
 
 
@@ -650,11 +802,20 @@ def extract_assertions(proc: dict, tag_lookup: dict[str, str]) -> str:
     return ", ".join(result)
 
 
-def extract_guidance(proc: dict) -> str:
-    """Extract lightbulb guidance text from the procedure."""
+def extract_guidance(proc: dict,
+                     doc_labels: dict[str, str] | None = None) -> "str | CellRichText":
+    """Extract lightbulb guidance text from the procedure.
+
+    Returns a CellRichText with underlined runs when the guidance HTML contains
+    hyperlinks, otherwise a plain string."""
     guidances = proc.get("guidances") or {}
     guidance_html = guidances.get("en", "") or proc.get("guidance", "") or ""
-    return strip_html(guidance_html)
+    if not guidance_html:
+        return ""
+    attachables = proc.get("attachables") or {}
+    segments = parse_html_segments(guidance_html, attachables=attachables,
+                                   doc_labels=doc_labels)
+    return _segments_to_cell_value(segments)
 
 
 # ── ID RESOLUTION ────────────────────────────────────────────────────────────
@@ -1024,6 +1185,30 @@ DATA_FONT      = Font(size=10)
 DATA_ALIGN     = Alignment(vertical="top", wrap_text=True)
 DATA_ALIGN_NW  = Alignment(vertical="top", wrap_text=False)
 
+LINK_INLINE_FONT = InlineFont(u="single", color="FF0563C1")  # blue underline
+
+
+def _segments_to_cell_value(segments: list[TextSegment]) -> "str | CellRichText":
+    """Convert text segments to a plain str or CellRichText with underlined links.
+
+    Returns a plain str when no links exist (the common case), and a CellRichText
+    with blue-underlined runs for anchor-tagged text otherwise."""
+    has_links = any(seg.is_link for seg in segments)
+    if not has_links:
+        return "".join(seg.text for seg in segments)
+
+    parts = []
+    for seg in segments:
+        if not seg.text:
+            continue
+        if seg.is_link:
+            parts.append(TextBlock(LINK_INLINE_FONT, seg.text))
+        else:
+            parts.append(seg.text)
+
+    return CellRichText(*parts) if parts else ""
+
+
 # Column layout: A through S (19 columns)
 COLUMN_HEADERS = [
     "Procedure Text",                    # A
@@ -1077,8 +1262,8 @@ def _apply_section_style(ws, row_num: int, max_col: int = 19):
         cell.alignment = DATA_ALIGN
 
 
-def _write_procedure_row(ws, row_num: int, text: str, standards: str,
-                         assertions: str, guidance: str, settings: dict,
+def _write_procedure_row(ws, row_num: int, text: "str | CellRichText", standards: str,
+                         assertions: str, guidance: "str | CellRichText", settings: dict,
                          vis_columns: list[str], rs_row: dict):
     """Write a single procedure row with all columns."""
     ws.cell(row=row_num, column=1, value=text).alignment = DATA_ALIGN           # A
@@ -1117,7 +1302,8 @@ def _write_response_set_only_row(ws, row_num: int, rs_row: dict):
 
 def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
                           tag_lookup: dict[str, str] | None = None,
-                          checklist_defaults: dict | None = None):
+                          checklist_defaults: dict | None = None,
+                          doc_labels: dict[str, str] | None = None):
     """Write a single checklist's data to a worksheet."""
     tag_lookup = tag_lookup or {}
     checklist_defaults = checklist_defaults or {}
@@ -1175,13 +1361,13 @@ def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
     row_num = 3
     for proc in ordered:
         proc_type = classify_procedure(proc, by_id, children_by_parent)
-        text = _get_procedure_display_text(proc)
+        text = _get_procedure_display_text(proc, doc_labels=doc_labels)
 
         if proc_type == "section_header":
             ws.cell(row=row_num, column=1, value=text)
             _apply_section_style(ws, row_num)
             # Section headers can have guidance (lightbulb)
-            guidance_sh = extract_guidance(proc)
+            guidance_sh = extract_guidance(proc, doc_labels=doc_labels)
             if guidance_sh:
                 ws.cell(row=row_num, column=4, value=guidance_sh).alignment = DATA_ALIGN
             # Section headers can still have visibility conditions
@@ -1195,7 +1381,7 @@ def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
         settings = extract_procedure_settings(proc, checklist_defaults)
         standards = extract_standards(proc)
         assertions = extract_assertions(proc, tag_lookup)
-        guidance = extract_guidance(proc)
+        guidance = extract_guidance(proc, doc_labels=doc_labels)
         vis_columns = format_visibility_columns(proc, by_id, lookup, tag_lookup)
         response_rows = get_response_set_rows(proc, checklist_defaults)
 
@@ -1353,7 +1539,7 @@ def generate_report_bytes(
             sheet_name = _unique_sheet_name(sheet_name, existing_names)
             ws = wb.create_sheet(title=sheet_name)
             build_checklist_sheet(ws, procedures, id_lookup, tag_lookup,
-                                 cl_defaults)
+                                 cl_defaults, doc_labels=doc_labels)
             sheets_created += 1
 
         except Exception as exc:
@@ -1479,7 +1665,13 @@ def _mock_procedures() -> list[dict]:
                                    {"id": "r-ex", "name": "Completed with exceptions", "nonOptimal": True},
                                ]}],
          },
-         "guidances": {"en": "<p>You can use the bank confirmation template provided A.130 Bank confirmation</p>"},
+         "guidances": {"en": '<p>You can use the bank confirmation template provided <a href="cw://doc/A130">A.130 Bank confirmation</a></p>'},
+         "attachables": {
+             "ref-risk-work": {"kind": "link", "documentId": "doc-risk-work"},
+         },
+         "text": '<p>Develop and document expectations for the period-end cash balance, '
+                 'considering the risk work performed in '
+                 '<a reference="ref-risk-work" class="reference"></a>.</p>',
          "visibility": {"normallyVisible": True, "conditions": []}},
 
         # Group procedure 15: has children, no response sets, with visibility
@@ -1615,15 +1807,23 @@ def _mock_id_lookup() -> dict[str, str]:
     }
 
 
+def _mock_doc_labels() -> dict[str, str]:
+    """Mock document label lookup for link resolution."""
+    return {
+        "doc-risk-work": "2-900 Risk assessment",
+    }
+
+
 def run_mock():
     """Generate a report from mock data for testing."""
     procedures = _mock_procedures()
     lookup = _mock_id_lookup()
+    doc_labels = _mock_doc_labels()
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     ws = wb.create_sheet(title="A.100 Cash - Audit proce...")
-    build_checklist_sheet(ws, procedures, lookup, {})
+    build_checklist_sheet(ws, procedures, lookup, {}, doc_labels=doc_labels)
 
     os.makedirs(os.path.dirname(OUTPUT_FILE) or ".", exist_ok=True)
     wb.save(OUTPUT_FILE)
@@ -1640,9 +1840,16 @@ def run_discover(engagement_id: str, checklist_id: str = "",
     env_prefix = _env_prefix_from_host(host)
     session = make_session(env_prefix, host=host, tenant=tenant)
 
-    if not checklist_id:
+    documents = fetch_documents(session, engagement_id, host=host, tenant=tenant)
+    # Build doc_id → content mapping (procedures use content, not doc id)
+    doc_id_to_content = {d["id"]: d.get("content", d["id"])
+                         for d in documents if "id" in d}
+
+    if checklist_id:
+        # Resolve document id → content id
+        checklist_id = doc_id_to_content.get(checklist_id, checklist_id)
+    else:
         # Find the first checklist with procedures
-        documents = fetch_documents(session, engagement_id, host=host, tenant=tenant)
         for doc in documents:
             cid = doc.get("content", "") or doc.get("id", "")
             procs = fetch_procedures(session, engagement_id, cid, host=host, tenant=tenant)
