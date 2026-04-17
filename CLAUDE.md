@@ -42,8 +42,10 @@ The region prefix is derived from the hostname (e.g. `ca.cwcloudpartner.com` →
 
 ## Output
 
-Excel workbook with columns A–S per sheet:
-- **A**: Procedure text (hierarchical)
+Excel workbook with one **procedure sheet per checklist** (columns A–S), plus a trailing **`Glossary & Dynamic Text`** reference sheet when the template contains any dynamic text or glossary references.
+
+Procedure sheet columns:
+- **A**: Procedure text (hierarchical; inline `[[value]]`/`[[?]]` markers in blue mark each dynamic-text span, and the cell hyperlinks to the reference sheet)
 - **B**: Authoritative reference (AU-C citations)
 - **C**: Assertions (C, E, A, V, PD)
 - **D**: Lightbulb guidance
@@ -52,6 +54,8 @@ Excel workbook with columns A–S per sheet:
 - **L–P**: Visibility conditions 1–5
 - **Q–S**: Additional cloud settings
 
+The reference sheet has two stacked sections: GLOSSARY (unique wording terms referenced by any extracted checklist, with all their conditions and outputs) and DYNAMIC TEXT (every `<span formula="">` occurrence expanded into one row per condition). Wording-type rows in the Dynamic Text section hyperlink back up to the matching Glossary row. See [workflows/extract_checklists.md](workflows/extract_checklists.md) for the full layout.
+
 ## Key API Quirks
 
 - Procedures use the document's `content` field as `checklistId`, not the document `id`. The tool handles this mapping internally.
@@ -59,6 +63,8 @@ Excel workbook with columns A–S per sheet:
 - Citations live in `proc.attachables` with `kind: "citation"`, not a top-level field.
 - Settings field names differ from what you'd guess: `allowSignOffs` (not `allowSignoffs`), `allowNote` (not `allowInputNotes`), `showResponsesBelow` (not `showResponseBeneathProcedure`).
 - Procedures without explicit settings inherit from checklist-level defaults via `checklist/get`.
+- **Dynamic text** (`<span formula="refId">` in procedure HTML) resolves via `proc.attachables[refId]` — two flavours: local `values[]` arrays of condition/output pairs, or global glossary references `wording("@<tag_id>")`.
+- **Glossary terms** are NOT a dedicated endpoint. They are tags with `subKind: "wording"` (fetch via `tag/get` with that filter). A wording tag's `parent` can point to another wording tag used as a UI group header (e.g. "Accounting framework"). The `organization_type` condition type appears almost exclusively inside wording tag values.
 
 ## Project Structure
 

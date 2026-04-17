@@ -64,11 +64,13 @@ python tools/checklist_extract.py --discover --url "<url>"
 
 ## Output Format
 
-Each Excel sheet contains columns A through S:
+The workbook contains one procedure sheet per checklist plus (when applicable) a trailing `Glossary & Dynamic Text` reference sheet.
+
+Each procedure sheet contains columns A through S:
 
 | Column | Content |
 |--------|---------|
-| A | Procedure text (hierarchical) |
+| A | Procedure text (hierarchical; dynamic-text markers styled blue and hyperlinked) |
 | B | Authoritative reference (e.g., AU-C 520.05) |
 | C | Assertions (C, E, A, V, PD) |
 | D | Lightbulb guidance |
@@ -81,6 +83,17 @@ Row types are visually distinguished:
 - **Blue background** — section headers
 - **Regular rows** — procedures with settings
 - **Lettered items (a, b, c)** — sub-procedures
+
+### Dynamic Text
+
+Procedures in CaseWare templates can include dynamic text spans that resolve based on engagement state (organization type, responses to other procedures, consolidation status, etc.). These appear in column A as:
+
+- `[[value]]` — formula resolved to a value (shown in blue)
+- `[[?]]` — formula is present but its condition isn't met in this engagement (still visible so the gap is discoverable)
+
+The procedure cell hyperlinks to the `Glossary & Dynamic Text` sheet, which has two sections:
+- **Glossary** — every referenced global term, one row per condition (Group / Term / Condition / Output)
+- **Dynamic Text** — every `<span formula>` occurrence across all checklists, one row per condition
 
 ## Project Structure
 

@@ -63,7 +63,9 @@ The tool accepts two URL patterns:
 
 ## Output Format
 
-Excel workbook with columns:
+Excel workbook with **one procedure sheet per checklist**, plus a single shared **`Glossary & Dynamic Text`** reference sheet appended at the end (only if any dynamic text or glossary references are found).
+
+### Procedure Sheet Columns
 
 | Column | Content |
 |--------|---------|
@@ -75,6 +77,26 @@ Excel workbook with columns:
 | I-K | Cloud Settings (input notes, notes placeholder, sign-offs) |
 | L-P | Visibility Conditions 1-5 |
 | Q-S | Cloud Settings (allow multiple rows, show response beneath, override) |
+
+### Inline Dynamic Text Markers
+
+Procedure text contains `<span formula="...">` placeholders that the UI renders as dynamic text chips. The extractor wraps the resolved value in `[[ ]]`:
+
+- `[[ASPE]]` — formula resolved to a value (e.g. glossary term)
+- `[[, if applicable]]` — conditional text whose condition is currently met
+- `[[?]]` — formula is present in the template but its condition is unmet in this engagement (renders blank in the UI; kept visible in Excel so the gap is discoverable)
+
+The `[[ ]]` substrings are styled in blue, and the whole cell is hyperlinked to the corresponding row in the `Glossary & Dynamic Text` sheet.
+
+### Glossary & Dynamic Text Sheet
+
+Two stacked sections:
+
+**GLOSSARY section** (top) — one row per condition for every glossary term referenced by any extracted checklist. Columns: Group | Term | Condition | Output. Only terms actually referenced appear (not every wording tag in the engagement). Data sourced from `tag/get` filtered on `subKind="wording"`.
+
+**DYNAMIC TEXT section** (below) — one row per condition for every `<span formula="">` occurrence across all extracted checklists. Columns: Checklist | Proc # | Procedure Text | Current Value | Condition | Condition Detail | Output.
+- For response conditions, Condition Detail is the resolved three-line `{checklist_name}\n{procedure_name}\n= {response}`.
+- For wording (glossary) formulas, Condition Detail shows the term description and hyperlinks to the corresponding Glossary row above.
 
 ### Row Types
 
@@ -92,6 +114,9 @@ Excel workbook with columns:
 | Guidance | `proc.guidances.en` or `proc.guidance` |
 | Settings E-K, Q-S | `proc.settings` or inherited from `checklist/get` defaults |
 | Visibility L-P | `proc.visibility.conditions[]` — types: response, rmm_rank, enum_value, boolean_value, condition_group, organization_type, consolidation |
+| Inline `[[...]]` markers in A | `proc.attachables[refId].calculated` for each `<span formula="refId">` in `proc.text` |
+| Dynamic Text section | `proc.attachables[*].values[]` — condition/output pairs for local formulas |
+| Glossary section | `tag/get` filtered on `subKind="wording"` → each referenced term's `attachables[*].values[]` |
 
 ### Assertion Mapping
 

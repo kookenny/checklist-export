@@ -96,11 +96,11 @@ def strip_html(html: str, formula_map: dict[str, str] | None = None) -> str:
         r"((\1))",
         html,
     )
-    if formula_map:
+    if formula_map is not None:
         def _resolve_formula(m: re.Match) -> str:
             fid = m.group(1)
             val = formula_map.get(fid, "")
-            return f"[[{val}]]" if val else ""
+            return f"[[{val}]]" if val else "[[?]]"
         text = re.sub(
             r'<span[^>]*\bformula="([^"]*)"[^>]*>.*?</span>',
             _resolve_formula,
@@ -135,11 +135,11 @@ def parse_html_segments(html: str, formula_map: dict[str, str] | None = None,
         r"((\1))",
         html,
     )
-    if formula_map:
+    if formula_map is not None:
         def _resolve_formula(m: re.Match) -> str:
             fid = m.group(1)
             val = formula_map.get(fid, "")
-            return f"[[{val}]]" if val else ""
+            return f"[[{val}]]" if val else "[[?]]"
         text = re.sub(
             r'<span[^>]*\bformula="([^"]*)"[^>]*>.*?</span>',
             _resolve_formula,
@@ -206,6 +206,15 @@ def parse_html_segments(html: str, formula_map: dict[str, str] | None = None,
 
     if not segments:
         return [TextSegment("")]
+
+    # Insert a space between adjacent segments when both sides are word chars.
+    # CaseWare HTML often has no whitespace around <a> tags (e.g. "See<a>520 Risk report</a>for"),
+    # which otherwise renders as "See520 Risk reportfor".
+    for i in range(len(segments) - 1):
+        cur = segments[i].text
+        nxt = segments[i + 1].text
+        if cur and nxt and cur[-1].isalnum() and nxt[0].isalnum():
+            segments[i] = TextSegment(cur + " ", segments[i].is_link)
 
     # Trim leading/trailing whitespace from the outer edges only
     segments[0] = TextSegment(segments[0].text.lstrip(), segments[0].is_link)
@@ -467,14 +476,86 @@ def fetch_tag_lookup(session: http_lib.Session,
         return {}
 
 
+def fetch_wording_tags(session: http_lib.Session,
+                       engagement_id: str,
+                       host: str | None = None,
+                       tenant: str | None = None) -> dict[str, dict]:
+    """Fetch glossary/wording tags (tag.subKind == 'wording'). Returns {tag_id: tag}."""
+    host = host or HOST
+    tenant = tenant or TENANT
+    url = f"{host}/{tenant}/e/eng/{engagement_id}/api/v1.12.0/tag/get"
+    payload = {"filter": {"filter": {
+        "node": "=",
+        "left":  {"node": "field", "kind": "tag", "field": "subKind"},
+        "right": {"node": "string", "value": "wording"},
+    }}}
+    try:
+        tags = _api_post(session, url, payload)
+        return {t["id"]: t for t in tags if t.get("id")}
+    except Exception as exc:
+        log.warning("Could not fetch wording tags: %s", exc)
+        return {}
+
+
 # ── PROCEDURE HELPERS ────────────────────────────────────────────────────────
 
-def _get_procedure_name(proc: dict) -> str:
+_FORMULA_MARKER_RE = re.compile(r'\[\[.*?\]\]')
+_FORMULA_BLUE_FONT = InlineFont(color="0563C1")
+
+
+def _split_formula_runs(s: str) -> list:
+    """Split *s* on [[...]] markers, returning a list of plain strings and blue TextBlocks."""
+    parts: list = []
+    pos = 0
+    for m in _FORMULA_MARKER_RE.finditer(s):
+        if m.start() > pos:
+            parts.append(s[pos:m.start()])
+        parts.append(TextBlock(_FORMULA_BLUE_FONT, m.group()))
+        pos = m.end()
+    if pos < len(s):
+        parts.append(s[pos:])
+    return parts
+
+
+def _highlight_formula_markers(value):
+    """Return *value* with any [[...]] markers styled blue via CellRichText.
+
+    Input may be a plain string or CellRichText. If no markers are found the original
+    value is returned unchanged, so callers pay no cost for procedures without formulas.
+    """
+    if isinstance(value, CellRichText):
+        new_parts: list = []
+        changed = False
+        for part in value:
+            if isinstance(part, str) and _FORMULA_MARKER_RE.search(part):
+                new_parts.extend(_split_formula_runs(part))
+                changed = True
+            else:
+                new_parts.append(part)
+        return CellRichText(*new_parts) if changed else value
+    if isinstance(value, str) and _FORMULA_MARKER_RE.search(value):
+        return CellRichText(*_split_formula_runs(value))
+    return value
+
+
+def build_formula_map(proc: dict) -> dict[str, str]:
+    """Build {referenceId: calculated_value} from proc.attachables."""
+    result = {}
+    for a in (proc.get("attachables") or {}).values():
+        ref_id = a.get("referenceId")
+        calc = (a.get("calculated") or "").strip()
+        if ref_id and calc:
+            result[ref_id] = calc
+    return result
+
+
+def _get_procedure_name(proc: dict,
+                        formula_map: dict[str, str] | None = None) -> str:
     """Return the display name of a procedure as a plain string."""
     summary = proc.get("summaryNames") or {}
     name = summary.get("en", "") or next(iter(summary.values()), "")
     if not name:
-        name = strip_html(proc.get("text", ""))
+        name = strip_html(proc.get("text", ""), formula_map=formula_map)
     return name
 
 
@@ -485,26 +566,29 @@ def _get_procedure_display_text(proc: dict,
     Parses proc.text HTML to produce a CellRichText with underlined runs when
     hyperlinks are present. Falls back to a plain string otherwise."""
     proc_html = proc.get("text", "")
+    formula_map = build_formula_map(proc)
     number = proc.get("number", "")
     prefix = f"{number}. " if number else ""
 
     if proc_html and "<a" in proc_html:
         attachables = proc.get("attachables") or {}
-        segments = parse_html_segments(proc_html, attachables=attachables,
-                                       doc_labels=doc_labels)
+        segments = parse_html_segments(proc_html, formula_map=formula_map,
+                                       attachables=attachables, doc_labels=doc_labels)
         value = _segments_to_cell_value(segments)
         if isinstance(value, CellRichText):
-            return CellRichText(prefix, *value) if prefix else value
+            return _highlight_formula_markers(
+                CellRichText(prefix, *value) if prefix else value
+            )
         # Plain string result (no links resolved) — apply prefix normally
         if prefix and not value.startswith(number):
-            return f"{prefix}{value}"
-        return value
+            value = f"{prefix}{value}"
+        return _highlight_formula_markers(value)
 
     # No links — plain string path
-    name = _get_procedure_name(proc)
+    name = _get_procedure_name(proc, formula_map=formula_map)
     if prefix and name and not name.startswith(number):
-        return f"{prefix}{name}"
-    return name
+        name = f"{prefix}{name}"
+    return _highlight_formula_markers(name)
 
 
 # ── PROCEDURE TREE ───────────────────────────────────────────────────────────
@@ -897,24 +981,36 @@ def build_id_lookup(session: http_lib.Session,
                     procedures: list[dict],
                     doc_labels: dict[str, str],
                     host: str | None = None,
-                    tenant: str | None = None) -> dict[str, str]:
-    """Build a {id: human_name} lookup for all IDs referenced in visibility conditions.
+                    tenant: str | None = None,
+                    lookup: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a {id: human_name} lookup for IDs in visibility + dynamic-text conditions.
 
     Resolves checklist names, procedure names, and response option names.
+    If *lookup* is provided, new resolutions are added in-place (shared across checklists).
     """
-    # Collect all unique IDs from visibility conditions
+    # Collect all unique IDs from visibility conditions AND dynamic-text formula conditions
     procedure_ids: set = set()
     checklist_ids: set = set()
     for proc in procedures:
         for cond in (proc.get("visibility") or {}).get("conditions") or []:
             _collect_procedure_ids_from_cond(cond, procedure_ids)
             _collect_checklist_ids_from_cond(cond, checklist_ids)
+        # Also scan formula attachables for cross-references to procedures/checklists
+        for a in (proc.get("attachables") or {}).values():
+            for entry in a.get("values") or []:
+                cond = entry.get("condition") or {}
+                _collect_procedure_ids_from_cond(cond, procedure_ids)
+                _collect_checklist_ids_from_cond(cond, checklist_ids)
 
     log.info("  %d procedure IDs, %d checklist IDs to resolve",
              len(procedure_ids), len(checklist_ids))
 
-    # Seed with document labels
-    lookup: dict[str, str] = dict(doc_labels)
+    # Seed with document labels (merge into shared lookup if provided)
+    if lookup is None:
+        lookup = dict(doc_labels)
+    else:
+        for k, v in doc_labels.items():
+            lookup.setdefault(k, v)
 
     # Resolve checklist names
     for cid in checklist_ids:
@@ -1300,10 +1396,273 @@ def _write_response_set_only_row(ws, row_num: int, rs_row: dict):
     ws.cell(row=row_num, column=8, value=rs_row.get("display_inline")).alignment = DATA_ALIGN_NW
 
 
+def collect_formula_records(proc: dict, sheet_name: str, proc_row: int,
+                            lookup: dict[str, str] | None = None) -> list[dict]:
+    """Return one record per condition for each formula span in proc.text.
+
+    *proc_row* is the row number in the checklist sheet where this procedure was written
+    (used later to wire hyperlinks from the procedure text cell to the Dynamic Text row).
+    *lookup* resolves condition IDs (checklistId/procedureId/responseId) to display names.
+    """
+    text_html = proc.get("text", "")
+    formula_refs = set(re.findall(r'formula="([^"]+)"', text_html))
+    if not formula_refs:
+        return []
+
+    lookup = lookup or {}
+    attachables = proc.get("attachables") or {}
+    ref_to_att = {a.get("referenceId"): a for a in attachables.values() if a.get("referenceId")}
+
+    proc_text = strip_html(text_html)[:120]
+    proc_number = proc.get("number", "")
+
+    def _parse_val(raw: str) -> str:
+        try:
+            return json.loads(raw).strip("\u00a0").strip()
+        except Exception:
+            return raw.strip('"').strip()
+
+    records = []
+    for ref_id in sorted(formula_refs):
+        a = ref_to_att.get(ref_id, {})
+        calculated = (a.get("calculated") or "").strip()
+
+        if "values" in a:
+            for entry in a.get("values", []):
+                cond = entry.get("condition", {})
+                ctype = cond.get("type", "")
+                val_text = _parse_val(entry.get("value", '""'))
+
+                if ctype == "always_true":
+                    cond_display = "Default (fallback)"
+                    cond_detail = ""
+                elif ctype == "consolidation":
+                    cond_display = ("Consolidated engagement"
+                                    if cond.get("consolidated") else "Non-consolidated")
+                    cond_detail = ""
+                elif ctype == "response":
+                    cond_display = "Response condition"
+                    cond_detail = _format_response_condition(cond, lookup)
+                else:
+                    cond_display = ctype
+                    cond_detail = ""
+
+                records.append({
+                    "sheet_name": sheet_name, "proc_number": proc_number,
+                    "proc_text": proc_text, "ref_id": ref_id, "proc_row": proc_row,
+                    "calculated": calculated, "cond_type": cond_display,
+                    "cond_detail": cond_detail, "output": val_text,
+                })
+        elif a.get("formula"):
+            formula_str = a.get("formula", "")
+            m = re.search(r'wording\("@([^"]+)"\)', formula_str)
+            term_id = m.group(1) if m else ""
+            records.append({
+                "sheet_name": sheet_name, "proc_number": proc_number,
+                "proc_text": proc_text, "ref_id": ref_id, "proc_row": proc_row,
+                "calculated": calculated, "cond_type": "Wording (glossary)",
+                "cond_detail": formula_str, "output": calculated,
+                "term_id": term_id,
+            })
+        else:
+            records.append({
+                "sheet_name": sheet_name, "proc_number": proc_number,
+                "proc_text": proc_text, "ref_id": ref_id, "proc_row": proc_row,
+                "calculated": calculated, "cond_type": "Unknown",
+                "cond_detail": "", "output": calculated,
+            })
+    return records
+
+
+_COUNTRY_NAMES: dict[str, str] = {
+    "CA": "Canada", "US": "United States", "GB": "United Kingdom", "UK": "United Kingdom",
+    "AU": "Australia", "NZ": "New Zealand", "IE": "Ireland", "ZA": "South Africa",
+}
+
+
+def _format_glossary_condition(cond: dict, lookup: dict[str, str] | None = None) -> str:
+    """Format a glossary-term condition for display (one cell)."""
+    ctype = cond.get("type", "")
+    if ctype == "always_true":
+        return "Default (fallback)"
+    if ctype == "organization_type":
+        cc = cond.get("countryCode", "")
+        country = _COUNTRY_NAMES.get(cc, cc)
+        org = _resolve_org_type(cond)
+        return f"{country}\n{org}" if country else org
+    if ctype == "consolidation":
+        return "Consolidated" if cond.get("consolidated") else "Not consolidated"
+    if ctype == "response":
+        resolved = _format_response_condition(cond, lookup or {})
+        return resolved or "Response condition"
+    return ctype or "Unknown"
+
+
+def collect_glossary_records(tag: dict, wording_tags: dict[str, dict],
+                             lookup: dict[str, str] | None = None) -> list[dict]:
+    """Expand a wording tag's values[] into one record per condition."""
+    term_name = tag.get("name") or (tag.get("names") or {}).get("en", "")
+    parent_id = tag.get("parent", "")
+    parent_tag = wording_tags.get(parent_id, {}) if parent_id else {}
+    group_name = (parent_tag.get("name")
+                  or (parent_tag.get("names") or {}).get("en", "")) if parent_tag else ""
+
+    def _parse_val(raw) -> str:
+        if isinstance(raw, dict):
+            raw = (raw.get("en") or "")
+        try:
+            return json.loads(raw).strip("\u00a0").strip()
+        except Exception:
+            return str(raw).strip('"').strip()
+
+    records = []
+    for a in (tag.get("attachables") or {}).values():
+        values = a.get("values") or []
+        if not values:
+            continue
+        for entry in values:
+            cond = entry.get("condition") or {}
+            records.append({
+                "term_id": tag.get("id", ""),
+                "group": group_name,
+                "term_name": term_name,
+                "condition": _format_glossary_condition(cond, lookup),
+                "output": _parse_val(entry.get("value", '""')),
+            })
+    return records
+
+
+REFERENCE_SHEET_NAME = "Glossary & Dynamic Text"
+
+
+def write_combined_reference_sheet(wb, glossary_records: list[dict],
+                                   formula_records: list[dict],
+                                   wording_tags: dict[str, dict] | None = None
+                                   ) -> tuple[dict[str, int], dict[tuple, int]]:
+    """Write the combined 'Glossary & Dynamic Text' sheet.
+
+    Layout: a GLOSSARY section on top (Group/Term/Condition/Output, using cols A/C/E/G),
+    a spacer row, then a DYNAMIC TEXT section (Checklist/Proc #/Procedure Text/Current
+    Value/Condition/Condition Detail/Output, using cols A-G).
+
+    Returns a tuple (glossary_rows, dyn_rows):
+      - glossary_rows: {term_id: row_number} — for wording → glossary hyperlinks
+      - dyn_rows:      {(sheet_name, ref_id): row_number} — for procedure → dyn text hyperlinks
+    """
+    if not glossary_records and not formula_records:
+        return {}, {}
+    wording_tags = wording_tags or {}
+
+    ws = wb.create_sheet(title=REFERENCE_SHEET_NAME)
+
+    # Column widths shared across both sections (chosen so Term/Procedure Text share col C)
+    widths = {"A": 22, "B": 10, "C": 55, "D": 22, "E": 28, "F": 40, "G": 40}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+
+    section_font = Font(bold=True, color="FFFFFF", size=12)
+    section_fill = PatternFill("solid", fgColor="1F4E79")  # dark blue
+    section_align = Alignment(horizontal="left", vertical="center")
+
+    row = 1
+
+    # ── GLOSSARY SECTION ──
+    glossary_rows: dict[str, int] = {}
+    if glossary_records:
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
+        banner = ws.cell(row=row, column=1, value="GLOSSARY")
+        banner.font = section_font
+        banner.fill = section_fill
+        banner.alignment = section_align
+        row += 1
+
+        # Glossary uses cols A (Group), C (Term), E (Condition), G (Output)
+        for col, header in [(1, "Group"), (3, "Term"), (5, "Condition"), (7, "Output")]:
+            c = ws.cell(row=row, column=col, value=header)
+            c.fill = HEADER_FILL
+            c.font = HEADER_FONT
+            c.alignment = HEADER_ALIGN
+        row += 1
+
+        prev_term = None
+        for rec in glossary_records:
+            glossary_rows.setdefault(rec["term_id"], row)
+            if rec["term_id"] != prev_term:
+                ws.cell(row=row, column=1, value=rec["group"]).alignment = DATA_ALIGN
+                ws.cell(row=row, column=3, value=rec["term_name"]).alignment = DATA_ALIGN
+            ws.cell(row=row, column=5, value=rec["condition"]).alignment = DATA_ALIGN
+            ws.cell(row=row, column=7,
+                    value=rec["output"] or "(empty)").alignment = DATA_ALIGN
+            prev_term = rec["term_id"]
+            row += 1
+
+        # Spacer between sections
+        row += 1
+
+    # ── DYNAMIC TEXT SECTION ──
+    dyn_rows: dict[tuple, int] = {}
+    if formula_records:
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
+        banner = ws.cell(row=row, column=1, value="DYNAMIC TEXT")
+        banner.font = section_font
+        banner.fill = section_fill
+        banner.alignment = section_align
+        row += 1
+
+        dt_headers = ["Checklist", "Proc #", "Procedure Text", "Current Value",
+                      "Condition", "Condition Detail", "Output"]
+        for col, header in enumerate(dt_headers, 1):
+            c = ws.cell(row=row, column=col, value=header)
+            c.fill = HEADER_FILL
+            c.font = HEADER_FONT
+            c.alignment = HEADER_ALIGN
+        row += 1
+
+        prev_key = None
+        for rec in formula_records:
+            key = (rec["sheet_name"], rec["proc_number"], rec["ref_id"])
+            hkey = (rec["sheet_name"], rec["ref_id"])
+            dyn_rows.setdefault(hkey, row)
+
+            if key != prev_key:
+                ws.cell(row=row, column=1, value=rec["sheet_name"]).alignment = DATA_ALIGN
+                ws.cell(row=row, column=2, value=rec["proc_number"]).alignment = DATA_ALIGN
+                ws.cell(row=row, column=3, value=rec["proc_text"]).alignment = DATA_ALIGN
+                ws.cell(row=row, column=4,
+                        value=rec["calculated"] or "(empty)").alignment = DATA_ALIGN
+            ws.cell(row=row, column=5, value=rec["cond_type"]).alignment = DATA_ALIGN
+
+            # Condition Detail (col F) — for wording rows, replace raw formula with term
+            # name and hyperlink to the Glossary section row above.
+            cond_detail = rec["cond_detail"]
+            term_id = rec.get("term_id", "")
+            glossary_target = glossary_rows.get(term_id) if term_id else None
+            if rec["cond_type"] == "Wording (glossary)" and term_id and term_id in wording_tags:
+                tag = wording_tags[term_id]
+                tname = tag.get("name") or (tag.get("names") or {}).get("en", "")
+                if tname:
+                    cond_detail = tname
+            detail_cell = ws.cell(row=row, column=6, value=cond_detail)
+            detail_cell.alignment = DATA_ALIGN
+            if glossary_target:
+                detail_cell.hyperlink = (
+                    f"#'{REFERENCE_SHEET_NAME}'!A{glossary_target}"
+                )
+                detail_cell.style = "Hyperlink"
+
+            ws.cell(row=row, column=7,
+                    value=rec["output"] or "(empty)").alignment = DATA_ALIGN
+            prev_key = key
+            row += 1
+
+    return glossary_rows, dyn_rows
+
+
 def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
                           tag_lookup: dict[str, str] | None = None,
                           checklist_defaults: dict | None = None,
-                          doc_labels: dict[str, str] | None = None):
+                          doc_labels: dict[str, str] | None = None,
+                          sheet_name: str = "") -> list[dict]:
     """Write a single checklist's data to a worksheet."""
     tag_lookup = tag_lookup or {}
     checklist_defaults = checklist_defaults or {}
@@ -1358,8 +1717,12 @@ def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
     ordered = build_procedure_tree(procedures)
 
     # ── Write data rows ──
+    all_formula_records: list[dict] = []
     row_num = 3
     for proc in ordered:
+        all_formula_records.extend(
+            collect_formula_records(proc, sheet_name, proc_row=row_num, lookup=lookup)
+        )
         proc_type = classify_procedure(proc, by_id, children_by_parent)
         text = _get_procedure_display_text(proc, doc_labels=doc_labels)
 
@@ -1425,6 +1788,8 @@ def build_checklist_sheet(ws, procedures: list[dict], lookup: dict[str, str],
                               "Q", "R", "S"]
                 for col in merge_cols:
                     ws.merge_cells(f"{col}{start_row}:{col}{end_row}")
+
+    return all_formula_records
 
 
 def _sanitize_sheet_name(name: str) -> str:
@@ -1513,6 +1878,8 @@ def generate_report_bytes(
 
     existing_names: set[str] = set()
     sheets_created = 0
+    all_formula_records: list[dict] = []
+    shared_lookup: dict[str, str] = dict(doc_labels)
 
     for idx, (checklist_id, label) in enumerate(checklists_to_extract, start=1):
         log.info("Processing %d/%d: %s", idx, len(checklists_to_extract), label)
@@ -1525,9 +1892,10 @@ def generate_report_bytes(
 
             log.info("  %d procedures in %s", len(procedures), label)
 
-            # Build ID lookup for visibility resolution
+            # Build ID lookup for visibility + dynamic-text resolution (shared across checklists)
             id_lookup = build_id_lookup(session, engagement_id, procedures,
-                                        doc_labels, host=host, tenant=tenant)
+                                        doc_labels, host=host, tenant=tenant,
+                                        lookup=shared_lookup)
 
             # Fetch checklist-level default settings
             cl_defaults = fetch_checklist_defaults(session, engagement_id,
@@ -1538,8 +1906,10 @@ def generate_report_bytes(
             sheet_name = _sanitize_sheet_name(label)
             sheet_name = _unique_sheet_name(sheet_name, existing_names)
             ws = wb.create_sheet(title=sheet_name)
-            build_checklist_sheet(ws, procedures, id_lookup, tag_lookup,
-                                 cl_defaults, doc_labels=doc_labels)
+            formula_recs = build_checklist_sheet(ws, procedures, id_lookup, tag_lookup,
+                                                 cl_defaults, doc_labels=doc_labels,
+                                                 sheet_name=sheet_name)
+            all_formula_records.extend(formula_recs or [])
             sheets_created += 1
 
         except Exception as exc:
@@ -1550,6 +1920,68 @@ def generate_report_bytes(
             "No checklists found in this engagement. "
             "The documents may not contain any checklist procedures."
         )
+
+    # Fetch glossary/wording tags and build Glossary sheet (referenced terms only)
+    wording_tags = fetch_wording_tags(session, engagement_id, host=host, tenant=tenant)
+    referenced_term_ids = {rec["term_id"] for rec in all_formula_records
+                           if rec.get("term_id") and rec["term_id"] in wording_tags}
+
+    # Resolve procedure/checklist IDs referenced by glossary term response conditions,
+    # so _format_response_condition has the names available in shared_lookup.
+    gt_proc_ids: set = set()
+    gt_cl_ids: set = set()
+    for tid in referenced_term_ids:
+        for a in (wording_tags[tid].get("attachables") or {}).values():
+            for entry in a.get("values") or []:
+                c = entry.get("condition") or {}
+                _collect_procedure_ids_from_cond(c, gt_proc_ids)
+                _collect_checklist_ids_from_cond(c, gt_cl_ids)
+    for cid in gt_cl_ids - set(shared_lookup):
+        name = fetch_checklist_name(session, engagement_id, cid, host=host, tenant=tenant)
+        if name:
+            shared_lookup[cid] = name
+    for pid in gt_proc_ids - set(shared_lookup):
+        fetched = fetch_procedure_by_id(session, engagement_id, pid, host=host, tenant=tenant)
+        if not fetched:
+            continue
+        pname = _get_procedure_name(fetched)
+        if pname:
+            shared_lookup[pid] = pname
+        for rs in (fetched.get("settings") or {}).get("responseSets") or []:
+            for resp_opt in rs.get("responses") or []:
+                rid = resp_opt.get("id", "")
+                rname = resp_opt.get("name", "") or (resp_opt.get("names") or {}).get("en", "")
+                if rid and rname:
+                    shared_lookup[rid] = rname
+
+    glossary_records: list[dict] = []
+    for term_id in sorted(
+        referenced_term_ids,
+        key=lambda tid: (
+            ((wording_tags.get(wording_tags.get(tid, {}).get("parent", ""), {}) or {})
+              .get("name", "") or ""),
+            wording_tags.get(tid, {}).get("name", "") or "",
+        )
+    ):
+        glossary_records.extend(
+            collect_glossary_records(wording_tags[term_id], wording_tags, lookup=shared_lookup)
+        )
+    glossary_rows, first_dyn_row = write_combined_reference_sheet(
+        wb, glossary_records, all_formula_records, wording_tags=wording_tags
+    )
+
+    # Wire hyperlinks: procedure text cell -> first formula's row in the combined sheet
+    seen: set[tuple] = set()
+    for rec in all_formula_records:
+        key = (rec["sheet_name"], rec["proc_row"])
+        if key in seen:
+            continue
+        seen.add(key)
+        dyn_row = first_dyn_row.get((rec["sheet_name"], rec["ref_id"]))
+        if not dyn_row:
+            continue
+        proc_cell = wb[rec["sheet_name"]].cell(row=rec["proc_row"], column=1)
+        proc_cell.hyperlink = f"#'{REFERENCE_SHEET_NAME}'!A{dyn_row}"
 
     log.info("Created %d checklist sheet(s)", sheets_created)
 
